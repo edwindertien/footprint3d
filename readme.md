@@ -1,8 +1,22 @@
-# footprint3d — SVG contour → 3-D STL pipeline
+# footprint3d — SVG paw/footprint → 3-D printable stamp
 
-Converts a 2-D SVG footprint (paw, foot, any filled shape) into a printable
-3-D model via a distance-field height map and OpenSCAD. Produces either a
-flat embossed tile or a paw-shaped stamp ready for pressing into clay or wax.
+![The printed paw stamp, lying on soil](images/footprint.jpg)
+
+Converts a 2-D SVG footprint (here a wolf paw, but any filled shapes work) into a
+printable 3-D relief via a distance-field height map and OpenSCAD. The result is a
+**paw-shaped stamp**: raised pads and claws on a base plate whose outline follows the
+paw, ready for pressing into clay, sand or wax.
+
+> Picking this project up again, or handing it to someone else?
+> Read **[context.md](context.md)** — the technical hand-off: decisions, verified facts,
+> known issues and next steps.
+
+## Result at a glance
+
+| 1. Input (SVG/PNG) | 2. Height map | 3. OpenSCAD model | 4. Printed |
+|:---:|:---:|:---:|:---:|
+| <img src="input/paw.png" width="150" alt="Input paw silhouette"> | <img src="output/paw_heightmap.png" width="150" alt="Greyscale height map"> | <img src="images/3dmodel.png" width="220" alt="OpenSCAD render of the model"> | <img src="images/footprint.jpg" width="200" alt="Printed stamp"> |
+| [`input/paw.svg`](input/paw.svg) | [`output/paw_heightmap.png`](output/paw_heightmap.png) · [`.svg`](output/paw_heightmap.svg) | [`output/paw.scad`](output/paw.scad) · [`paw.stl`](output/paw.stl) | print of the STL |
 
 ```
 your_footprint.svg
@@ -15,7 +29,7 @@ your_footprint.svg
       │
       ├──▶  _heightmap.svg   coloured iso-contour visualisation
       ├──▶  _heightmap.png   greyscale preview
-      ├──▶  .scad            OpenSCAD script (polygon embedded)
+      ├──▶  .scad            OpenSCAD script (paw outline polygon embedded)
       └──▶  _heights.dat     height grid loaded by the .scad
 ```
 
@@ -23,15 +37,43 @@ your_footprint.svg
 
 ## Contents
 
+- [Project layout](#project-layout)
 - [Setup](#setup)
 - [Python environment quirks](#python-environment-quirks)
 - [Quick start](#quick-start)
 - [Parameters](#parameters)
 - [How the height map works](#how-the-height-map-works)
+- [From height map to STL in OpenSCAD](#from-height-map-to-stl-in-openscad)
 - [SVG input requirements and limits](#svg-input-requirements-and-limits)
 - [Output files](#output-files)
 - [Test shapes](#test-shapes)
+- [Known issues](#known-issues)
 - [Scientific alternatives](#scientific-alternatives)
+
+---
+
+## Project layout
+
+```
+.
+├── README.md                 this file
+├── context.md                technical hand-off (decisions, verified facts, next steps)
+├── footprint3d.py            the pipeline (SVG → height map → .scad + .dat)
+├── make_test_shapes.py       generates synthetic test SVGs
+├── input/
+│   ├── paw.svg               the paw used throughout (9 subpaths: pad, 4 toes, 4 claws)
+│   ├── paw.png               raster version of the same paw
+│   └── wolfspootafdrukstempel1.pdf   original design brief (see below)
+├── output/                   generated files for input/paw.svg  (see "Output files")
+├── images/                   photos and screenshots used in this README
+└── test_shapes/              synthetic SVGs for testing
+```
+
+**The design brief** — [`input/wolfspootafdrukstempel1.pdf`](input/wolfspootafdrukstempel1.pdf)
+("2D-ontwerp voor 3D-wolfspootafdrukstempel met handvat", i.e. a 2-D design for a 3-D wolf-paw
+print stamp *with handle*) specifies a paw of 7.59 × 10.75 cm and a print depth of about 3 cm in
+sand, with a photo of a real wolf print for reference. The handle and the 3 cm depth are **not
+implemented yet** — see [Known issues](#known-issues).
 
 ---
 
@@ -39,26 +81,19 @@ your_footprint.svg
 
 ### 1. Install OpenSCAD
 
-Download from https://openscad.org/downloads.html and install normally.
-Version 2021.01 or newer. Used only for the final render step.
+Download from https://openscad.org/downloads.html. Developed and verified against
+**OpenSCAD 2021.01**; used only for the final render step.
 
 ### 2. Install Python 3.11+
 
-If you don't have Python 3.11 or newer:
-
 ```bash
 brew install python        # macOS with Homebrew
-```
-
-Check your version:
-```bash
 python3 --version
 ```
 
 ### 3. Create a virtual environment
 
-**Always use a venv for this project** — see [Python environment quirks](#python-environment-quirks)
-for why this matters.
+**Always use a venv for this project** — see [Python environment quirks](#python-environment-quirks).
 
 ```bash
 cd ~/Desktop/paw           # or wherever your project lives
@@ -67,8 +102,7 @@ source venv/bin/activate   # macOS / Linux
 # venv\Scripts\activate    # Windows
 ```
 
-Your prompt will now show `(venv)` at the start. Every time you open a new
-terminal to use the script, activate the venv first.
+Your prompt now shows `(venv)`. Activate it again in every new terminal.
 
 ### 4. Install Python dependencies
 
@@ -77,7 +111,7 @@ pip install svgpathtools svgwrite
 pip install numpy scipy scikit-image Pillow
 ```
 
-That's it — no system libraries required, no Homebrew extras.
+No system libraries and no Homebrew extras are required.
 
 ### 5. Verify
 
@@ -91,72 +125,69 @@ python -c "from svgpathtools import svg2paths2; import numpy, scipy, skimage, PI
 
 ### Why not just `pip install` globally?
 
-On macOS, running `pip install` without a venv installs packages into whichever
-Python environment owns the `pip` command — which is often not the one you think.
+On macOS, `pip install` without a venv installs into whichever Python owns the `pip`
+command — often not the one you think. Four separate problems showed up here:
 
-In this project we hit two specific problems:
+**Problem 1 — PlatformIO's Python.**
+The first `pip install` went into PlatformIO's internal virtualenv
+(`~/.platformio/penv/`), which is meant for PlatformIO's own use. Installing `cairosvg` there
+needed to compile `pycairo`, which needs the Cairo C library (`libcairo`) on the OS. Without it
+the build died with a long Meson error (`Pkg-config … not found`,
+`Run-time dependency cairo found: NO`).
 
-**Problem 1 — PlatformIO's Python**
-The first `pip install` attempt landed inside PlatformIO's internal virtualenv
-(`/Users/.../platformio/penv/`). This environment is locked down for PlatformIO's
-own use. When it tried to install `cairosvg`, it needed to compile `pycairo`
-from source, which requires the Cairo C library (`libcairo`) installed at the
-OS level. Without it, the build failed with a long Meson error.
+**Problem 2 — `cairosvg` imports but cannot run.**
+Even where `cairosvg` installed, using it raised `OSError: no library called "cairo-2" was found`.
+The Python package is only a wrapper; the native Cairo library must be installed separately.
 
-**Problem 2 — `svglib` pulling in `rlpycairo`**
-The next attempt used `svglib` as an SVG renderer. `svglib` lists `rlpycairo`
-as a dependency, which lists `pycairo` as its dependency — same Cairo C library
-problem. Installing with `--no-deps` avoided the chain, but then `reportlab`
-(svglib's renderer) still tried to use `rlPyCairo` at runtime and crashed.
+**Problem 3 — `svglib` pulls in `rlpycairo` → `pycairo`.**
+Switching to `svglib` hit the same Cairo wall one level deeper (`svglib → rlpycairo → pycairo`),
+even inside a clean venv. Installing `svglib` with `--no-deps` got past pip, but rendering then
+failed with `cannot import desired renderPM backend rlPyCairo`.
 
-**The final solution**
-We dropped both `cairosvg` and `svglib` entirely. The script now uses
-`svgpathtools` to parse SVG paths directly and `Pillow` to rasterise them.
-Both are pure Python with no C library dependencies. A clean venv ensures no
-interference from system or tool-managed Python environments.
+**Problem 4 — `svgpathtools --no-deps` misses `svgwrite`.**
+`svgpathtools` imports `svgwrite` when the package loads, so a `--no-deps` install fails with
+`ModuleNotFoundError: No module named 'svgwrite'`. Install it normally (`pip install svgpathtools svgwrite`).
 
-**Rule of thumb**: if you see errors mentioning `cairo`, `pycairo`, `Meson`,
-`pkg-config`, or `libcairo.so`, you have a system library dependency problem.
-The solution is always to avoid the package that needs it, not to fight the
-C library installation.
+**The final solution:** drop `cairosvg` and `svglib` entirely. The script parses SVG paths with
+`svgpathtools` and rasterises them with `Pillow` — both pure Python. A clean venv keeps tool-managed
+Pythons out of the picture.
 
-### Why not `brew install cairo` and be done with it?
+**Rule of thumb:** if an error mentions `cairo`, `pycairo`, `Meson`, `pkg-config` or `libcairo`,
+you have a system-library problem. Avoid the package that needs it rather than fighting the install.
 
-You could, but then you're coupling your Python environment to a system library
-that future Homebrew updates can break. The pure-Python approach is more robust
-and easier to share with others.
+(`brew install cairo` would also work, but couples your Python environment to a system library
+that future Homebrew updates can break.)
 
 ### Reactivating the venv
-
-Each new terminal session needs the venv activated:
 
 ```bash
 cd ~/Desktop/paw
 source venv/bin/activate
 ```
-
-You can add this to your shell profile or create a small shell script if you
-use the tool frequently.
 
 ---
 
 ## Quick start
 
 ```bash
-# Activate venv
 cd ~/Desktop/paw
 source venv/bin/activate
 
-# Basic emboss (rectangular base, paw sits on a flat tile)
-python footprint3d.py paw.svg --depth 8 --base 2 --width 80 --out output/
+# Reproduces the files in output/ exactly (verified byte-for-byte)
+python footprint3d.py input/paw.svg --depth 8 --base 2 --width 80 --out output/
 
-# Stamp mode (paw-shaped base, ready to press into clay or wax)
-python footprint3d.py paw.svg --depth 8 --base 3 --width 80 --stamp --out output/
+# Stamp variant: flat platform between the pads (see --stamp below)
+python footprint3d.py input/paw.svg --depth 8 --base 3 --width 80 --stamp --out output/
 
-# Open in OpenSCAD, press F6 to render, F7 to export STL
-# Or render from command line:
-openscad -o output/paw_stamp.stl output/paw_stamp.scad
+# Render the STL from the command line …
+openscad -o output/paw.stl output/paw.scad
+# … or open the .scad in OpenSCAD, press F6, then F7 to export.
 ```
+
+> **What `--width` means.** `--width` is the width of the whole *padded canvas*, not of the paw.
+> With the defaults (`--res 512 --padding 60`) and `--width 80`, the paw contour itself is
+> ≈ 58 × 92 mm and the finished stamp outline ≈ 72 × 105 mm. To hit a target size, scale
+> `--width` accordingly and measure the polygon extents in the generated `.scad`.
 
 ---
 
@@ -166,69 +197,70 @@ openscad -o output/paw_stamp.stl output/paw_stamp.scad
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--depth` | `8.0` | Total emboss height in mm — how far the tallest peak rises above the base |
-| `--base` | `2.0` | Base plate thickness in mm |
-| `--width` | `80.0` | Physical width of the printed model in mm. Height is derived automatically from the SVG aspect ratio |
-| `--res` | `512` | Rasterisation resolution in pixels (longest edge of the SVG content). Higher = more detail, slower |
-| `--downsample` | `4` | Decimation factor applied to the height grid before writing the `.dat` file. `4` means 1 sample per 4×4 px block. Lower = finer grid, larger file, slower OpenSCAD render |
+| `--depth` | `8.0` | Emboss height in mm: how far the peaks rise above `base`. The SVG contour itself sits at `base + depth/2` |
+| `--base` | `3.0` | Base plate thickness in mm (the height offset added to the whole height map) |
+| `--width` | `80.0` | Physical width of the padded canvas in mm. Height follows the aspect ratio |
+| `--res` | `512` | Rasterisation resolution in px (longest edge of the SVG content). Higher = more detail, slower |
+| `--downsample` | `4` | Stride applied to the height grid before writing the `.dat`: `4` keeps every 4th pixel. Lower = finer grid, bigger file, slower OpenSCAD render |
 
 ### Height map profiles
 
-The inside of each shape is mapped from `t=0` at the contour edge to `t=1`
-at the centre, then converted to a height using one of two profiles:
+Inside each shape, a normalised distance `t` runs from `0` at the contour to `1` at the centre of
+*that shape*. It is turned into a height by one of two profiles:
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--pad-power` | `2.0` | Exponent for large pads. Profile: `1-(1-t)^p`. Rises steeply from the contour and flattens toward the centre — a pillbox / stadium shape. `p=1` is linear, `p=2` gives steep sides with a broad flat top, `p=3` gives near-vertical walls |
-| `--nail-power` | `0.4` | Exponent for small shapes (nails/claws). Profile: `t^p`. Values below 1 give a fast initial rise and a sharp pointed tip |
-| `--size-threshold` | `0.25` | Shapes whose inscribed circle radius is less than this fraction of the largest shape's radius are classified as nails and get `--nail-power`. Increase if pads are being misclassified as nails |
+| `--pad-power` | `2.0` | Large shapes (pads): `1-(1-t)^p`. Steep rise at the contour, flat top — a pillbox. `p=1` linear, `p=2` steep sides + broad top, `p=3` near-vertical walls |
+| `--nail-power` | `0.4` | Small shapes (claws): `t^p`. Values below 1 rise fast and end in a pointed tip |
+| `--size-threshold` | `0.25` | A region whose inscribed-circle radius is below this fraction of the *largest* region's radius counts as a nail. Raise it if pads are misclassified |
 
 ```
-Profile 1-(1-t)^2  (pad, steep sides)    Profile t^0.4  (nail, pointed tip)
-height                                    height
-  1 ┤      ████████                         1 ┤  ▄█████████
-    │    ██        ██                         │ █          █
-    │  █              █                       │█            █
-  0 ┤██                ██                   0 ┤              ██
-    └──────────────────                       └──────────────────
-    edge              centre                  edge            centre
+Pad: 1-(1-t)^2  (steep sides, flat top)      Nail: t^0.4  (fast rise, pointed tip)
+height                                        height
+  1 ┤      ████████                              1 ┤  ▄█████████
+    │    ██        ██                              │ █          █
+    │  █              █                            │█            █
+  0 ┤██                ██                        0 ┤              ██
+    └──────────────────                            └──────────────────
+    edge              centre                       edge            centre
 ```
 
-### Bleed and smoothing
+### Bleed, smoothing and outline
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--blend` | `0.5` | Controls how wide the outward slope is beyond each shape's contour, as a fraction of the largest shape's inscribed radius. In stamp mode this also determines how far out the paw silhouette extends. `0.3` = tight, `0.5` = medium, `0.8` = wide |
-| `--smooth` | `1.5` | Gaussian blur sigma in pixels applied after the height map is computed. Softens the step at each shape's contour edge. Keep small (1–3); large values soften the profile too much |
-| `--padding` | `60` | Blank pixel border added around the SVG content before computing distances. Prevents the outward bleed from being clipped at the canvas edge. Increase if you see the shape touching the edge of the model |
-| `--simplify` | `1.0` | Ramer-Douglas-Peucker tolerance for simplifying the paw outline polygon that is embedded in the `.scad`. Higher = fewer polygon points, slightly less accurate outline |
+| `--blend` | `0.5` | Width of the outward slope beyond each contour, as a fraction of the largest shape's inscribed radius. It also sets how far the paw outline extends. `0.3` tight, `0.5` medium, `0.8` wide |
+| `--smooth` | `1.5` | Gaussian blur (px) applied to the finished height map. Keep it small (1–3) |
+| `--padding` | `60` | Blank pixels added around the SVG before computing distances, so the bleed is never clipped by the canvas edge. It is in pixels at `--res`: scale it if you change `--res` |
+| `--simplify` | `1.0` | Tolerance (px) for simplifying the outline polygon embedded in the `.scad`. Higher = fewer points |
 
 ### Stamp mode
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--stamp` | off | Enable stamp mode. The paw silhouette polygon is used to clip the height map surface and form the base. Outside the silhouette there is no material. The result is a paw-shaped object rather than a rectangular tile |
-| `--stamp-level` | `0.15` | Height of the flat platform between the pads, as a fraction of `--depth`. `0.15` = platform sits at `base + 0.15 × depth` mm. This is the surface that contacts the clay when you press the stamp |
+| `--stamp` | off | The outward bleed slopes down to a flat platform instead of to the base plate, and output files get a `_stamp` suffix. **The paw-shaped outline is used with or without this flag** |
+| `--stamp-level` | `0.15` | Platform height as a fraction of `--depth`: the platform sits at `base + stamp-level × depth`. Because the outline cuts the platform off, it leaves a vertical wall of that height at the stamp's edge |
 
-### Visualisation
+### Visualisation and output
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--levels` | `12` | Number of iso-contour colour bands in the `_heightmap.svg`. More bands = finer topographic detail in the preview |
-| `--out` | same folder as SVG | Output directory for all generated files |
+| `--levels` | `12` | Number of colour bands in `_heightmap.svg` |
+| `--out` | folder of the SVG | Output directory |
 
 ---
 
 ## How the height map works
 
-Each pixel in the rasterised SVG mask is assigned a distance value by the
-Euclidean Distance Transform (EDT): its distance to the nearest contour edge.
-This creates a "distance landscape" where every iso-distance line is a smaller
-eroded copy of the original shape — so a kidney-shaped pad stays kidney-shaped
-all the way up to the peak.
+Each pixel of the rasterised mask gets its distance to the nearest contour edge (Euclidean
+Distance Transform). Every iso-distance line is a smaller, eroded copy of the original shape, so
+a kidney-shaped pad stays kidney-shaped all the way up to its peak. That distance is normalised
+per region and passed through a profile function:
 
-The distance is normalised per region (0 at the contour, 1 at the centre) and
-passed through a profile function to produce a height:
+![Greyscale height map of the paw](output/paw_heightmap.png)
+
+*White = high, black = base level. Pads form flat-topped pillows; claws taper to a ridge.
+[Colour-banded SVG version](output/paw_heightmap.svg).*
 
 ```
   height
@@ -244,141 +276,159 @@ passed through a profile function to produce a height:
     far outside    contour    centre    contour    far outside
 ```
 
-The outward bleed (from contour toward 0) uses a cosine curve regardless
-of the inward profile, giving a smooth organic fade between shapes.
+The outward bleed (from the contour down to the floor) always uses a cosine ease, whatever the
+inward profile. In `--stamp` mode the floor is the stamp platform instead of zero.
 
-In stamp mode, the outward bleed fades to `stamp_level` (not 0), creating
-a flat platform between the pads at a consistent pressing height.
+---
+
+## From height map to STL in OpenSCAD
+
+The generated `.scad` combines the rectangular `surface()` height grid with the paw outline:
+
+```openscad
+union() {
+  intersection() {                       // relief, clipped to the paw outline
+    scale([px_x, px_y, 1])
+      surface(file = "paw_heights.dat", center = true, convexity = 10);
+    linear_extrude(height = total_h) paw_outline();
+  }
+  linear_extrude(height = base) paw_outline();   // solid paw-shaped base plate
+}
+```
+
+`paw_outline()` is a `polygon()` embedded in the `.scad` — no external SVG is imported (see
+[why](#why-svg-import-in-openscad-was-abandoned)).
+
+![OpenSCAD with paw.scad loaded and the model previewed](images/openscad.png)
+
+*OpenSCAD 2021.01 with the generated `paw.scad`. Note the base plate line here
+(`translate([0,0,-4]) linear_extrude(height = 5)`) was hand-edited to thicken the base; the
+generator itself writes `linear_extrude(height = base)`.*
+
+![Rendered 3-D model](images/3dmodel.png)
+
+*The rendered model. The pale pit near the base of each claw is a known artefact — see
+[Known issues](#known-issues).*
+
+Render and export: open the `.scad`, press **F6** (full render, ~30–60 s), then **F7**
+(export STL) — or use the `openscad -o` command from the quick start. The result for the paw is
+[`output/paw.stl`](output/paw.stl).
 
 ---
 
 ## SVG input requirements and limits
 
+The script reads [`input/paw.svg`](input/paw.svg) (raster twin: [`input/paw.png`](input/paw.png)):
+
+![Input paw silhouette](input/paw.png)
+
 ### What works
 
-- Filled `<path>` elements with M, L, C, S, Q, A commands (lines, bezier curves, arcs)
-- Compound paths: multiple M...Z subpaths inside one `<path>` element
-- `<g>` group transforms: `translate()` and `scale()` are correctly applied
-- Black fill on white or transparent background
-- Inkscape "Trace Bitmap" output (Plain SVG format)
-- Multiple separate shapes as separate `<path>` elements
+- Filled `<path>` elements with M, L, C, S, Q, A commands (lines, béziers, arcs)
+- Compound paths: many `M…Z` subpaths inside one `<path>` (as in `paw.svg`: 9 subpaths in one path)
+- `<g>` transforms `translate()` and `scale()`, including nested groups
+- Black fill on white or transparent background; Inkscape Trace Bitmap output (Plain SVG)
 
 ### What will fail or give wrong results
 
 | Issue | Symptom | Fix |
 |-------|---------|-----|
-| Primitive elements (`<circle>`, `<ellipse>`, `<rect>`, `<polygon>`) | Shape not found, empty mask | In Inkscape: select all → **Path → Object to Path** → save as Plain SVG |
-| Stroke-only paths (no fill) | Empty mask | Add a black fill to all shapes |
-| Group transforms using `rotate()`, `matrix()`, `skewX/Y()` | Shape misaligned or distorted | Flatten transforms in Inkscape: select all → **Object → Flatten Transforms** |
-| `<use>`, `<symbol>`, `<defs>` references | Shapes missing | Unlink all clones/symbols in Inkscape before export |
-| Very fine details smaller than ~2px at `--res 512` | Detail lost | Use `--res 1024` or higher |
-| Semi-transparent fills | Shape partially missing | Set all fills to fully opaque black (opacity: 1) |
-| SVG with `viewBox` but no `width`/`height` attributes | Wrong physical size | Add `width` and `height` to the `<svg>` root element |
+| `<circle>`, `<ellipse>`, `<rect>`, `<polygon>` | Shape missing, empty mask | Inkscape: select all → **Path → Object to Path**, save as Plain SVG |
+| Stroke-only paths (no fill) | Empty mask | Give every shape a black fill |
+| `rotate()`, `matrix()`, `skewX/Y()` transforms | Shape misaligned | Inkscape: **Object → Flatten Transforms** |
+| `<use>`, `<symbol>`, `<defs>` references | Shapes missing | Unlink clones/symbols before export |
+| Details under ~2 px at `--res 512` | Detail lost | Use `--res 1024` (and scale `--padding`) |
+| Semi-transparent fills | Shape partly missing | Make fills fully opaque black |
+| No `width`/`height` on `<svg>` (only `viewBox`) | Wrong aspect/size | Add `width` and `height` |
+| Shapes that **touch or overlap** | Treated as one region: no separate pad/nail profiles | Keep a visible gap between shapes (see [Test shapes](#test-shapes)) |
 
 ### Inkscape preparation checklist
 
-1. Open your SVG in Inkscape
-2. Select all (`Ctrl+A`)
-3. **Path → Object to Path** (converts circles, rects etc. to paths)
-4. **Object → Flatten Transforms** (if you have rotated groups)
-5. Ensure all shapes have black fill and no stroke (or stroke is irrelevant)
-6. **File → Save a Copy → Plain SVG** (not Inkscape SVG, which has extra metadata)
+1. Open the SVG in Inkscape and select all (`Ctrl+A`)
+2. **Path → Object to Path**
+3. **Object → Flatten Transforms** if any group is rotated
+4. Black fill on every shape
+5. **File → Save a Copy → Plain SVG** (not Inkscape SVG)
 
 ### Why SVG import in OpenSCAD was abandoned
 
-We initially tried to export the paw outline as a separate SVG file and use
-OpenSCAD's `import()` to bring it in. This caused persistent centering problems
-due to three compounding ambiguities in how OpenSCAD 2021 handles SVG:
-
-- **Y-axis flip**: SVG Y goes downward, OpenSCAD Y goes upward. OpenSCAD is
-  supposed to flip this automatically but the behaviour changed between versions.
-- **ViewBox origin**: OpenSCAD places the viewBox *bottom-left corner* at its
-  own origin (0,0), not the viewBox centre — so a centered viewBox still lands
-  offset.
-- **Units**: SVG dimensions in `mm`, `px`, or unitless are interpreted
-  inconsistently between OpenSCAD versions.
-
-The solution: the paw outline polygon is computed in Python in the same
-coordinate system as `surface(center=true)` and embedded directly as a
-`polygon()` inside the `.scad` file. No external SVG file, no coordinate
-system guessing.
+An early version wrote the paw outline to a separate SVG and loaded it with `import()`. Centering
+kept failing because of three compounding ambiguities in OpenSCAD 2021's SVG import: the **Y-axis
+flip** (SVG down vs. OpenSCAD up), the **viewBox origin** (the bottom-left corner of the viewBox
+becomes the origin, so a centred viewBox lands offset) and **units** (`mm`/`px`/unitless interpreted
+inconsistently). The outline is now computed in Python in the same coordinate system as
+`surface(center=true)` and embedded as a `polygon()`. `output/paw_outline.svg` is a leftover of
+the old approach and is no longer used.
 
 ---
 
 ## Output files
 
-```
-output/
-  paw_heightmap.svg     ← topographic preview (open in browser)
-                           blue = low, green = mid, red = peak
-  paw_heightmap.png     ← greyscale preview (white = high)
-  paw.scad              ← OpenSCAD script — open this in OpenSCAD
-  paw_heights.dat       ← height grid, loaded by the .scad
+Generated by `python footprint3d.py input/paw.svg --depth 8 --base 2 --width 80 --out output/`:
 
-  paw_stamp.scad        ← stamp mode version (paw-shaped base)
-  paw_stamp_heights.dat ← height grid for stamp mode
-```
+| File | What it is |
+|------|------------|
+| [`output/paw.scad`](output/paw.scad) | OpenSCAD script with the embedded outline polygon — open this |
+| [`output/paw_heights.dat`](output/paw_heights.dat) | Height grid in mm, read by the `.scad` (keep both files in one folder) |
+| [`output/paw.stl`](output/paw.stl) | The exported mesh (from the `.scad` with the hand-edited base, see above) |
+| [`output/paw_heightmap.png`](output/paw_heightmap.png) | Greyscale height map (white = high) |
+| [`output/paw_heightmap.svg`](output/paw_heightmap.svg) | Colour-banded height map (blue = low, red = peak); large file, open in a browser |
+| [`output/paw_outline.svg`](output/paw_outline.svg) | **Stale** — from the abandoned SVG-import approach, safe to delete |
 
-Keep the `.scad` and `_heights.dat` in the **same directory**.
-The `.scad` contains the paw outline polygon directly — no other files needed.
-
-### Rendering the STL
-
-In OpenSCAD GUI:
-1. Open `paw_stamp.scad`
-2. Press **F6** (full render — may take 30–60 seconds)
-3. Press **F7** or **File → Export → Export as STL**
-
-From the command line:
-```bash
-openscad -o paw_stamp.stl output/paw_stamp.scad
-```
+With `--stamp`, names become `paw_stamp.scad`, `paw_stamp_heights.dat`, `paw_stamp_heightmap.*`.
 
 ---
 
 ## Test shapes
 
-`make_test_shapes.py` generates four synthetic SVG shapes for testing:
+`python make_test_shapes.py` writes four synthetic SVGs to `test_shapes/`:
+
+| File | Description | Good for |
+|------|-------------|----------|
+| [`toes.svg`](test_shapes/toes.svg) | Circle body + 3 round toes (this is `shape_circle_3toes.svg` under a shorter name) | Basic pipeline check |
+| [`shape_ellipse_5toes.svg`](test_shapes/shape_ellipse_5toes.svg) | Ellipse body + 5 oval toes + heel | Aspect ratio, several regions |
+| [`shape_heel_block.svg`](test_shapes/shape_heel_block.svg) | Rounded rectangle | Profile symmetry |
+| [`shape_paw_4toes.svg`](test_shapes/shape_paw_4toes.svg) | 4-toe paw of ellipses | Overlapping-shape behaviour |
+
+All four run cleanly with the current script. Note that in `toes.svg` and `shape_paw_4toes.svg` the
+toes *overlap* the body, so each paw is one connected region and gets a single profile; use
+[`input/paw.svg`](input/paw.svg) to see the pad/nail distinction.
 
 ```bash
-python make_test_shapes.py
-# writes to test_shapes/
+python footprint3d.py test_shapes/shape_ellipse_5toes.svg --depth 8 --base 3 --width 80 --out output/
 ```
 
-| File | Description | Good for testing |
-|------|-------------|-----------------|
-| `shape_circle_3toes.svg` | Circle body + 3 circular toes | Basic pipeline check |
-| `shape_ellipse_5toes.svg` | Ellipse body + 5 oval toes + heel | Aspect ratio, multiple regions |
-| `shape_heel_block.svg` | Rounded rectangle | Profile symmetry |
-| `shape_paw_4toes.svg` | 4-toe paw with organic ellipses | Nail/pad classification |
+---
 
-```bash
-python footprint3d.py test_shapes/shape_paw_4toes.svg \
-  --depth 8 --base 3 --width 80 --stamp --out output/
-```
+## Known issues
+
+Details and ideas are in [context.md](context.md#9-known-issues-open-questions-and-next-steps).
+
+- **Claw pits.** Each claw shows a dark pit/step near its base in the OpenSCAD preview and a
+  matching notch in the [print](images/footprint.jpg). Cause not yet diagnosed.
+- **Mirrored top view.** Image row 0 maps to −Y, so the model seen from above is a vertical mirror of
+  the SVG. For a stamp pressed into clay the impression reads like the original; to make the model
+  itself read like the SVG, mirror it.
+- **`--width` is the canvas width**, not the paw width (see Quick start).
+- **Handle and 3 cm depth** from the design brief are not implemented.
+- **Touching shapes merge** into a single region.
 
 ---
 
 ## Scientific alternatives
 
-This script uses the morphological distance-field approach — practical for
-SVG-to-print with no measurement hardware. For higher accuracy:
+This script uses a morphological distance-field approach: practical for SVG-to-print with no
+measurement hardware. For higher accuracy:
 
-**Pressure plate / pedobarograph**
-Measure actual contact pressure on a grid sensor. Normalise pressure → height
-and feed directly to the `surface()` call, skipping the distance transform.
-Biomechanically accurate. Requires hardware.
+**Pressure plate / pedobarograph** — measure contact pressure on a grid sensor, normalise to height
+and feed it straight to `surface()`, skipping the distance transform. Biomechanically accurate;
+needs hardware.
 
-**Photogrammetry**
-Take 40–50 photos around the object. Process with Meshroom (free, GPU) or
-COLMAP to get a full 3-D mesh. No SVG pipeline needed at all.
+**Photogrammetry** — 40–50 photos processed with Meshroom (free, GPU) or COLMAP give a full mesh;
+no SVG pipeline needed.
 
-**Statistical shape model (PCA)**
-Fit a 2-D silhouette to a PCA model trained on thousands of 3-D scans
-(e.g. CAESAR anthropometric dataset). Used in medical orthotics CAD.
-Requires a large scan database and ICP registration.
+**Statistical shape model (PCA)** — fit a 2-D silhouette to a PCA model trained on thousands of 3-D
+scans (e.g. CAESAR). Used in orthotics CAD; needs a large scan database and ICP registration.
 
-**Depth-from-shading**
-Single photo taken under raking light encodes surface normals in the shading.
-Horn's algorithm (implementable in numpy) can recover approximate depth.
-Photo-only, no hardware needed, but requires careful lighting setup.
+**Depth-from-shading** — one photo under raking light encodes surface normals; Horn's algorithm
+(implementable in numpy) recovers approximate depth. Photo-only, but needs careful lighting.
